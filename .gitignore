@@ -1,0 +1,6 @@
+# OS files
+/**/.DS_Store
+
+# environment files
+.env*
+.tool-versions
