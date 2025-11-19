@@ -42,35 +42,33 @@ rescue Date::Error => e
   exit 1
 end
 
-# Configure Safari for automation
-options = Selenium::WebDriver::Safari::Options.new
+# Configure Chrome for automation
+options = Selenium::WebDriver::Chrome::Options.new
 
 # Speed up page loads significantly
 options.page_load_strategy = :eager # Don't wait for images/CSS to fully load
 
-# Initialize driver
-begin
-  driver = Selenium::WebDriver.for(:safari, options: options)
-rescue Selenium::WebDriver::Error::SessionNotCreatedError => e
-  raise unless e.message.include?('Allow remote automation')
+# Optional: Add Chrome arguments for better automation
+# options.add_argument('--headless') # Uncomment for headless mode
+# options.add_argument('--disable-gpu')
+# options.add_argument('--no-sandbox')
 
-  puts '❌ Safari Remote Automation is not enabled!'
+# Initialize driver with Chrome
+# Selenium 4.6+ automatically downloads and manages ChromeDriver
+begin
+  driver = Selenium::WebDriver.for(:chrome, options: options)
+rescue Selenium::WebDriver::Error::SessionNotCreatedError => e
+  puts '❌ Failed to start Chrome browser!'
   puts ''
-  puts 'To enable Safari for automation:'
-  puts '1. Open Safari'
-  puts '2. Go to Safari > Settings/Preferences (or press ⌘,)'
-  puts "3. Click on the 'Advanced' tab"
-  puts "4. Check the box at the bottom: 'Show Develop menu in menu bar'"
-  puts '5. Close Settings'
-  puts '6. Go to Develop menu > Allow Remote Automation'
+  puts "Error: #{e.message}"
   puts ''
-  puts 'Alternatively, run this command in Terminal (requires password):'
-  puts '  sudo safaridriver --enable'
+  puts 'Please make sure Chrome is installed on your system.'
+  puts 'Selenium will automatically download the appropriate ChromeDriver.'
   puts ''
   exit 1
 end
 
-# Maximize the Safari window
+# Maximize the Chrome window
 driver.manage.window.maximize
 puts '🔍 Maximized browser window for better element visibility'
 
@@ -360,6 +358,11 @@ In case you are interested to join it please ask during the event to Organisers/
 
 Looking forward seeing/meeting you 👋'
 
+  # Chrome WebDriver has issues with emojis (characters outside BMP)
+  # We need to filter them out or use JavaScript to insert the text
+  # Let's use JavaScript which can handle emojis better
+  activity_description_clean = activity_description
+
   # Set the description using CKEditor5
   begin
     # Wait for the description field
@@ -370,23 +373,78 @@ Looking forward seeing/meeting you 👋'
     editor_div = driver.find_elements(css: '[contenteditable="true"]').find { |e| e.displayed? rescue false }
 
     if editor_div
-      # Click to focus the editor
-      editor_div.click
-      sleep 0.3
-
-      # Send text line by line with Enter key for newlines to work properly in CKEditor
-      activity_description.split("\n").each_with_index do |line, index|
-        editor_div.send_keys(line) unless line.empty?
-        # Add line break (Enter key) after each line, except the last one
-        editor_div.send_keys(:return) if index < activity_description.split("\n").length - 1
-      end
-
+      # Scroll element into view and ensure it's clickable (Chrome-compatible)
+      driver.execute_script('arguments[0].scrollIntoView({block: "center", behavior: "smooth"});', editor_div)
       sleep 0.5
-      puts '✅ Description added via CKEditor'
+      
+      # Add debugging
+      puts '🔍 Attempting to add description with emojis...'
+      
+      # Try using CKEditor's setData API if available, otherwise use a hybrid approach
+      # First, try to access CKEditor instance
+      ckeditor_set_result = driver.execute_script(<<~JS, editor_div, activity_description_clean)
+        // arguments[0] = editableElement, arguments[1] = text
+        const editableElement = arguments[0];
+        const text = arguments[1];
+        
+        // Method 1: Try CKEditor API
+        if (window.CKEDITOR && window.CKEDITOR.instances) {
+          for (let instanceName in window.CKEDITOR.instances) {
+            const editor = window.CKEDITOR.instances[instanceName];
+            if (editor) {
+              editor.setData(text.replace(/\\n/g, '<br>'));
+              return 'ckeditor-api';
+            }
+          }
+        }
+        
+        // Method 2: Try CKEditor 5 API
+        for (let key in editableElement) {
+          if (key.startsWith('__reactInternalInstance') || key.startsWith('__reactFiber')) {
+            try {
+              const reactNode = editableElement[key];
+              // Try to find CKEditor instance in React fiber
+              let current = reactNode;
+              while (current) {
+                if (current.memoizedProps && current.memoizedProps.editor) {
+                  const editor = current.memoizedProps.editor;
+                  if (editor.setData) {
+                    editor.setData(text.replace(/\\n/g, '<br>'));
+                    return 'ckeditor5-react';
+                  }
+                }
+                current = current.return;
+              }
+            } catch (e) {}
+          }
+        }
+        
+        // Method 3: Direct DOM manipulation with proper formatting
+        editableElement.innerHTML = text.replace(/\\n/g, '<br>');
+        editableElement.focus();
+        
+        // Dispatch input event to trigger CKEditor's change detection
+        const inputEvent = new Event('input', { bubbles: true, cancelable: true });
+        editableElement.dispatchEvent(inputEvent);
+        
+        return 'dom-fallback';
+      JS
+      
+      sleep 0.5
+      puts "✅ Description added via CKEditor (method: #{ckeditor_set_result})"
+      
+      # Verify the content was added
+      content_check = driver.execute_script('return arguments[0].innerHTML;', editor_div)
+      if content_check.nil? || content_check.strip.empty?
+        puts '⚠️  WARNING: Description field appears empty after insertion!'
+        binding.pry
+      else
+        puts "✅ Verified: Description contains #{content_check.length} characters"
+      end
     else
       # Fallback: just set the textarea value (won't work with CKEditor but try anyway)
       desc_textarea = driver.find_element(name: 'view:form:baseForm:appointment-form:description')
-      driver.execute_script('arguments[0].value = arguments[1];', desc_textarea, activity_description)
+      driver.execute_script('arguments[0].value = arguments[1];', desc_textarea, activity_description_clean)
       puts '⚠️  Description set via textarea fallback (may not work)'
     end
   rescue Selenium::WebDriver::Error::NoSuchElementError => e
@@ -405,7 +463,9 @@ Looking forward seeing/meeting you 👋'
     # Fill in address
     location_address = ENV.fetch('LOCATION_ADDRESS')
     address_field = driver.find_element(name: 'view:form:baseForm:appointment-form:location:form:content:location-select:location:form:address')
-    address_field.click
+    driver.execute_script('arguments[0].scrollIntoView({block: "center"});', address_field)
+    sleep 0.3
+    driver.execute_script('arguments[0].click();', address_field)
     address_field.send_keys(location_address)
     sleep 2 # Wait for autocomplete suggestions
 
@@ -414,7 +474,7 @@ Looking forward seeing/meeting you 👋'
       # Wait for autocomplete dropdown and select first item
       wait.until { driver.find_elements(css: '.pac-item, .autocomplete-item, [role="option"]').any? }
       first_suggestion = driver.find_elements(css: '.pac-item, .autocomplete-item, [role="option"]').first
-      first_suggestion&.click
+      driver.execute_script('arguments[0].click();', first_suggestion) if first_suggestion
       puts '✅ Location address selected from suggestions'
     rescue Selenium::WebDriver::Error::TimeoutError
       # If no suggestions appear, just press enter

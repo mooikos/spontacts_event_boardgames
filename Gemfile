@@ -14,6 +14,6 @@ gem 'reline'
 gem 'dotenv'
 
 # browser automation
-gem 'selenium-webdriver'
+gem 'selenium-webdriver', '~> 4.27'
 
 gem "rubocop", "~> 1.81", group: :development
