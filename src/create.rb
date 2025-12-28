@@ -359,9 +359,15 @@ In case you are interested to join it please ask during the event to Organisers/
 Looking forward seeing/meeting you 👋'
 
   # Chrome WebDriver has issues with emojis (characters outside BMP)
-  # We need to filter them out or use JavaScript to insert the text
-  # Let's use JavaScript which can handle emojis better
-  activity_description_clean = activity_description
+  # Solution: Use placeholders during send_keys, then replace with emojis using JavaScript
+  emoji_map = {
+    '👋' => '__WAVE_EMOJI__',
+    '🙂' => '__SMILE_EMOJI__'
+  }
+  
+  # Replace emojis with placeholders for send_keys
+  activity_description_with_placeholders = activity_description.dup
+  emoji_map.each { |emoji, placeholder| activity_description_with_placeholders.gsub!(emoji, placeholder) }
 
   # Set the description using CKEditor5
   begin
@@ -377,74 +383,73 @@ Looking forward seeing/meeting you 👋'
       driver.execute_script('arguments[0].scrollIntoView({block: "center", behavior: "smooth"});', editor_div)
       sleep 0.5
       
-      # Add debugging
-      puts '🔍 Attempting to add description with emojis...'
+      # Focus the editor using JavaScript (more reliable in Chrome)
+      driver.execute_script('arguments[0].focus();', editor_div)
+      sleep 0.3
+
+      # Use send_keys with placeholders (this properly updates CKEditor's internal state)
+      activity_description_with_placeholders.split("\n").each_with_index do |line, index|
+        editor_div.send_keys(line) unless line.empty?
+        # Add line break (Enter key) after each line, except the last one
+        editor_div.send_keys(:return) if index < activity_description_with_placeholders.split("\n").length - 1
+      end
+
+      sleep 0.5
+      puts '✅ Description added via CKEditor (send_keys with placeholders)'
       
-      # Try using CKEditor's setData API if available, otherwise use a hybrid approach
-      # First, try to access CKEditor instance
-      ckeditor_set_result = driver.execute_script(<<~JS, editor_div, activity_description_clean)
-        // arguments[0] = editableElement, arguments[1] = text
-        const editableElement = arguments[0];
-        const text = arguments[1];
+      # Now replace placeholders with actual emojis using JavaScript
+      # And manually sync to the hidden textarea
+      replacement_script = <<~JS
+        const editor = arguments[0];
+        const textarea = arguments[1];
+        let html = editor.innerHTML;
         
-        // Method 1: Try CKEditor API
-        if (window.CKEDITOR && window.CKEDITOR.instances) {
-          for (let instanceName in window.CKEDITOR.instances) {
-            const editor = window.CKEDITOR.instances[instanceName];
-            if (editor) {
-              editor.setData(text.replace(/\\n/g, '<br>'));
-              return 'ckeditor-api';
-            }
-          }
-        }
+        // Replace each placeholder with actual emoji in HTML
+        html = html.replace(/__WAVE_EMOJI__/g, '👋');
+        html = html.replace(/__SMILE_EMOJI__/g, '🙂');
         
-        // Method 2: Try CKEditor 5 API
-        for (let key in editableElement) {
-          if (key.startsWith('__reactInternalInstance') || key.startsWith('__reactFiber')) {
-            try {
-              const reactNode = editableElement[key];
-              // Try to find CKEditor instance in React fiber
-              let current = reactNode;
-              while (current) {
-                if (current.memoizedProps && current.memoizedProps.editor) {
-                  const editor = current.memoizedProps.editor;
-                  if (editor.setData) {
-                    editor.setData(text.replace(/\\n/g, '<br>'));
-                    return 'ckeditor5-react';
-                  }
-                }
-                current = current.return;
-              }
-            } catch (e) {}
-          }
-        }
+        editor.innerHTML = html;
         
-        // Method 3: Direct DOM manipulation with proper formatting
-        editableElement.innerHTML = text.replace(/\\n/g, '<br>');
-        editableElement.focus();
+        // Also update the textarea by extracting text from HTML
+        // Create a temporary div to parse HTML and get text content
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = html;
+        textarea.value = tempDiv.innerText || tempDiv.textContent;
         
-        // Dispatch input event to trigger CKEditor's change detection
-        const inputEvent = new Event('input', { bubbles: true, cancelable: true });
-        editableElement.dispatchEvent(inputEvent);
+        // Trigger input events on both elements
+        const editorEvent = new Event('input', { bubbles: true, cancelable: true });
+        editor.dispatchEvent(editorEvent);
         
-        return 'dom-fallback';
+        const textareaEvent = new Event('change', { bubbles: true });
+        textarea.dispatchEvent(textareaEvent);
+        
+        return 'emojis-restored-and-synced';
       JS
       
+      desc_textarea = driver.find_element(name: 'view:form:baseForm:appointment-form:description')
+      result = driver.execute_script(replacement_script, editor_div, desc_textarea)
       sleep 0.5
-      puts "✅ Description added via CKEditor (method: #{ckeditor_set_result})"
+      puts "✅ Emojis restored (#{result})"
       
-      # Verify the content was added
-      content_check = driver.execute_script('return arguments[0].innerHTML;', editor_div)
-      if content_check.nil? || content_check.strip.empty?
-        puts '⚠️  WARNING: Description field appears empty after insertion!'
-        binding.pry
+      # Verify the emojis are in the textarea
+      desc_textarea = driver.find_element(name: 'view:form:baseForm:appointment-form:description')
+      textarea_content = driver.execute_script('return arguments[0].value;', desc_textarea)
+      
+      if textarea_content.include?('👋') || textarea_content.include?('🙂')
+        puts '✅ Emojis successfully saved in form data!'
       else
-        puts "✅ Verified: Description contains #{content_check.length} characters"
+        puts '⚠️  Emojis might not be in textarea - checking editor...'
+        editor_content = driver.execute_script('return arguments[0].innerHTML;', editor_div)
+        if editor_content.include?('👋') || editor_content.include?('🙂')
+          puts '✅ Emojis are in editor HTML - should work'
+        else
+          puts '⚠️  Warning: Emojis not found in editor or textarea'
+        end
       end
     else
       # Fallback: just set the textarea value (won't work with CKEditor but try anyway)
       desc_textarea = driver.find_element(name: 'view:form:baseForm:appointment-form:description')
-      driver.execute_script('arguments[0].value = arguments[1];', desc_textarea, activity_description_clean)
+      driver.execute_script('arguments[0].value = arguments[1];', desc_textarea, activity_description)
       puts '⚠️  Description set via textarea fallback (may not work)'
     end
   rescue Selenium::WebDriver::Error::NoSuchElementError => e
